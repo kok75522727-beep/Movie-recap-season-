@@ -99,6 +99,28 @@ def format_duration(seconds: int) -> str:
     return f"{seconds // 60}:{seconds % 60:02d}"
 
 
+def seconds_to_srt_time(seconds: float) -> str:
+    total_ms = max(0, round(seconds * 1000))
+    hours, remainder = divmod(total_ms, 3_600_000)
+    minutes, remainder = divmod(remainder, 60_000)
+    secs, millis = divmod(remainder, 1000)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
+
+
+def script_to_srt(script: str, duration_seconds: int, lines_per_caption: int = 2) -> str:
+    lines = [line.strip() for line in script.splitlines() if line.strip()]
+    if not lines:
+        return ""
+    chunks = [lines[index:index + lines_per_caption] for index in range(0, len(lines), lines_per_caption)]
+    slot = duration_seconds / len(chunks)
+    entries = []
+    for index, chunk in enumerate(chunks):
+        start = index * slot
+        end = duration_seconds if index == len(chunks) - 1 else (index + 1) * slot
+        entries.append(f"{index + 1}\\n{seconds_to_srt_time(start)} --> {seconds_to_srt_time(end)}\\n{'\\n'.join(chunk)}\\n")
+    return "\\n".join(entries)
+
+
 def generate_recap_script(video_path: Path, language: str, duration_seconds: int, tone: str, mode: str) -> str:
     client = get_client()
     uploaded = client.files.upload(file=str(video_path))
@@ -159,7 +181,7 @@ def pcm_to_wav(pcm: bytes) -> bytes:
     with wave.open(output.name, "wb") as wav_file:
         wav_file.setnchannels(1)
         wav_file.setsampwidth(2)
-        wav_file.setframerate(24000)
+                wav_file.setframerate(24000)
         wav_file.writeframes(pcm)
     data = Path(output.name).read_bytes()
     Path(output.name).unlink(missing_ok=True)
@@ -342,7 +364,7 @@ def main():
     if not upload:
         st.warning("Video ဖိုင်တစ်ခု ထည့်ပါ။")
         st.stop()
-
+    
     if "video_path" not in st.session_state or st.session_state.get("video_name") != upload.name:
         st.session_state.video_path = save_upload(upload)
         st.session_state.video_name = upload.name
@@ -470,18 +492,39 @@ def main():
             st.video(st.session_state.blurred_video_path)
             st.caption("Blur ပြီးသား Video Preview")
             st.divider()
-            st.subheader("4 · Gemini အသံရွေးပြီး အသံသွင်းပါ")
-            voice = st.selectbox("Gemini voice", list(VOICE_OPTIONS.keys()), format_func=lambda item: f"{item} · {VOICE_OPTIONS[item]}")
-            style = st.selectbox("Voice style", ["cinematic narrator", "warm narrator", "energetic creator", "serious documentary"])
-            if st.button("Voiceover ထုတ်မယ်", type="primary", use_container_width=True):
-                with st.spinner(f"Gemini {voice} အသံနဲ့ Voiceover ပြုလုပ်နေပါတယ်..."):
-                    try:
-                        st.session_state.audio = generate_voiceover(st.session_state.script, voice, style)
-                        st.success("Voiceover ရပါပြီ။")
-                    except Exception as exc:
-                        st.error(api_error_message(exc))
-        else:
-            st.info("Blur လုပ်ပြီးမှ Gemini အသံရွေးတဲ့အဆင့် ပေါ်လာပါမယ်။")
+            st.subheader("4 · မြန်မာစာတန်းထိုးနှင့် Style")
+            st.caption("စာတန်း၊ Font၊ စာလုံးအရောင်၊ Background အရောင်နဲ့ နေရာကို ကိုယ်တိုင်ရွေးပါ။ SRT ဖိုင်ထဲမှာ အရောင်/Font မသိမ်းနိုင်လို့ Style setting ကို App session မှာ သိမ်းထားပါတယ်။")
+            subtitle_text = st.text_area("မြန်မာစာတန်းထိုးစာသား", value=st.session_state.get("subtitle_text", st.session_state.script), height=160, key="subtitle_text")
+            subtitle_left, subtitle_right = st.columns(2)
+            with subtitle_left:
+                subtitle_font = st.selectbox("Font", ["Noto Sans Myanmar", "Pyidaungsu", "Myanmar Text", "Noto Sans", "Arial"], key="subtitle_font")
+                subtitle_size = st.slider("Font size", 16, 72, 34, key="subtitle_size")
+                subtitle_text_color = st.color_picker("စာတန်းအရောင်", "#FFFFFF", key="subtitle_text_color")
+                subtitle_outline_color = st.color_picker("Outline အရောင်", "#000000", key="subtitle_outline_color")
+            with subtitle_right:
+                subtitle_background_mode = st.selectbox("Background", ["Transparent", "Solid background"], key="subtitle_background_mode")
+                subtitle_background_color = st.color_picker("Background အရောင်", "#000000", key="subtitle_background_color")
+                subtitle_background_opacity = st.slider("Background opacity", 0, 100, 55, key="subtitle_background_opacity")
+                subtitle_position = st.selectbox("Position", ["Bottom", "Center", "Top"], key="subtitle_position")
+            subtitle_duration = get_video_duration(Path(st.session_state.blurred_video_path)) or get_video_duration(st.session_state.video_path) or 60
+            subtitle_srt = script_to_srt(subtitle_text, subtitle_duration)
+            st.download_button("SRT ဒေါင်းရန်", subtitle_srt.encode("utf-8"), file_name="burmese-subtitles.srt", mime="application/x-subrip", use_container_width=True)
+            st.success(f"Subtitle style သိမ်းပြီးပါပြီ · {subtitle_font} · {subtitle_text_color} · {subtitle_background_color}")
+
+        if not st.session_state.get("blurred_video_path"):
+            st.info("Blur Mask နဲ့ Subtitle အဆင့်ကို Skip လုပ်ထားပါတယ်။")
+
+        st.divider()
+        st.subheader("4 · Gemini အသံရွေးပြီး အသံသွင်းပါ")
+        voice = st.selectbox("Gemini voice", list(VOICE_OPTIONS.keys()), format_func=lambda item: f"{item} · {VOICE_OPTIONS[item]}")
+        style = st.selectbox("Voice style", ["cinematic narrator", "warm narrator", "energetic creator", "serious documentary"])
+        if st.button("Voiceover ထုတ်မယ်", type="primary", use_container_width=True):
+            with st.spinner(f"Gemini {voice} အသံနဲ့ Voiceover ပြုလုပ်နေပါတယ်..."):
+                try:
+                    st.session_state.audio = generate_voiceover(st.session_state.script, voice, style)
+                    st.success("Voiceover ရပါပြီ။")
+                except Exception as exc:
+                    st.error(api_error_message(exc))
 
     if st.session_state.get("audio"):
         st.audio(pcm_to_wav(st.session_state.audio), format="audio/wav")
@@ -489,7 +532,8 @@ def main():
         if st.button("Video + Voiceover ဖိုင် ထုတ်မယ်", use_container_width=True):
             with st.spinner("Video နဲ့ Voiceover ကို ပေါင်းနေပါတယ်..."):
                 try:
-                    st.session_state.output_video = merge_audio_video(Path(st.session_state.blurred_video_path), st.session_state.audio)
+                    source_video = Path(st.session_state.get("blurred_video_path") or st.session_state.video_path)
+                    st.session_state.output_video = merge_audio_video(source_video, st.session_state.audio)
                     st.success("Video အပြည့်အစုံနဲ့ Voiceover ကို အရှည်ကိုက်အောင် ပေါင်းပြီးပါပြီ။")
                 except Exception as exc:
                     st.error(f"FFmpeg မအောင်မြင်ပါ: {exc}")
@@ -501,4 +545,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-                                                  
+                
