@@ -60,12 +60,36 @@ def save_upload(uploaded_file) -> Path:
     return Path(handle.name)
 
 
-def generate_recap_script(video_path: Path, language: str, duration: str, tone: str) -> str:
+def get_video_duration(video_path: Path) -> int | None:
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", str(video_path)],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=True,
+        )
+        return max(1, round(float(result.stdout.strip())))
+    except (subprocess.SubprocessError, ValueError, FileNotFoundError):
+        return None
+
+
+def generate_recap_script(video_path: Path, language: str, duration_seconds: int, tone: str, mode: str) -> str:
     client = get_client()
     uploaded = client.files.upload(file=str(video_path))
-    prompt = f"""
+    if mode == "Faithful full translation":
+        prompt = f"""
+Watch the uploaded video and translate ALL spoken dialogue and narration into {language}.
+This is a faithful translation mode: do not summarize, shorten, skip, reorder, or invent anything.
+Preserve every meaningful sentence and event in the original order. Translate naturally and clearly for a native {language} speaker.
+Keep speaker changes and paragraph breaks when they are apparent. Do not add commentary, headings, timestamps, subtitles, or explanations.
+If a word is unclear, mark it as [မရှင်းလင်း] rather than inventing content.
+Return only the complete natural translation.
+"""
+    else:
+        prompt = f"""
 You are a professional movie recap editor. Watch the uploaded video and write a concise original narration in {language}.
-Target length: {duration}. Tone: {tone}.
+Target length: approximately {duration_seconds} seconds. Tone: {tone}.
 
 Important originality and safety rules:
 - Do not copy dialogue, subtitles, or any source narration word-for-word.
@@ -136,8 +160,56 @@ def merge_audio_video(video_path: Path, audio_bytes: bytes) -> bytes:
         output_path.unlink(missing_ok=True)
 
 
+def apply_cinematic_theme():
+    st.markdown(
+        """
+        <style>
+        @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap');
+        :root { --coral:#ff4f67; --violet:#8c6cff; --ink:#f7f7fb; --muted:#a9adbd; --panel:rgba(20,22,34,.78); }
+        .stApp { background: radial-gradient(circle at 5% 0%, rgba(140,108,255,.22), transparent 30%), radial-gradient(circle at 95% 10%, rgba(255,79,103,.14), transparent 25%), #080910; color:var(--ink); font-family:'DM Sans',sans-serif; }
+        .stApp::before { content:''; position:fixed; inset:0; pointer-events:none; opacity:.12; background-image:linear-gradient(rgba(255,255,255,.04) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.04) 1px,transparent 1px); background-size:48px 48px; mask-image:linear-gradient(to bottom,black,transparent 78%); }
+        h1,h2,h3 { font-family:'Space Grotesk',sans-serif !important; letter-spacing:-.04em; }
+        h1 { font-size:clamp(2.2rem,6vw,4.8rem) !important; background:linear-gradient(100deg,#fff 20%,#ff9a9f 58%,#9d8dff 90%); -webkit-background-clip:text; color:transparent; margin-bottom:.2rem !important; }
+        h2 { color:#fff !important; }
+        [data-testid='stHeader'] { background:rgba(8,9,16,.72); }
+        [data-testid='stSidebar'] { background:linear-gradient(180deg,rgba(20,22,35,.96),rgba(11,12,20,.98)); border-right:1px solid rgba(255,255,255,.09); }
+        [data-testid='stSidebar'] h2 { font-size:1.3rem !important; }
+        [data-testid='stExpander'] { background:linear-gradient(145deg,rgba(41,37,65,.72),rgba(19,21,32,.72)); border:1px solid rgba(255,255,255,.12); border-radius:20px; box-shadow:0 20px 60px rgba(0,0,0,.22); }
+        [data-testid='stFileUploader'] { background:linear-gradient(145deg,rgba(42,37,63,.6),rgba(19,21,31,.72)); border:1px dashed rgba(255,111,126,.55); border-radius:20px; padding:10px; box-shadow:0 12px 40px rgba(0,0,0,.22); }
+        [data-testid='stFileUploader'] section { background:transparent; border:0; }
+        [data-testid='stFileUploaderDropzone'] { background:rgba(255,255,255,.025); border-radius:14px; }
+        .stButton > button { width:100%; border:1px solid rgba(255,255,255,.14); border-radius:12px; padding:.72rem 1rem; color:#fff; background:linear-gradient(135deg,rgba(255,79,103,.95),rgba(132,76,255,.92)); box-shadow:0 10px 28px rgba(255,79,103,.18); font-weight:700; transition:transform .18s ease, box-shadow .18s ease; }
+        .stButton > button:hover { transform:translateY(-2px); box-shadow:0 14px 34px rgba(255,79,103,.3); border-color:rgba(255,255,255,.35); }
+        .stButton > button:active { transform:scale(.98); }
+        .stDownloadButton > button { width:100%; border-radius:12px; color:#ffdce0; background:rgba(255,79,103,.12); border:1px solid rgba(255,79,103,.38); }
+        .stTextInput input, .stTextArea textarea, .stSelectbox div[data-baseweb='select'] > div, .stNumberInput input { color:#fff !important; background:rgba(8,9,16,.72) !important; border:1px solid rgba(255,255,255,.13) !important; border-radius:11px !important; }
+        .stTextArea textarea:focus, .stTextInput input:focus { border-color:var(--coral) !important; box-shadow:0 0 0 1px var(--coral) !important; }
+        [data-testid='stAlert'] { border-radius:14px; border:1px solid rgba(255,255,255,.12); background:rgba(255,255,255,.06); }
+        [data-testid='stMetric'] { background:rgba(255,255,255,.055); border:1px solid rgba(255,255,255,.09); border-radius:15px; padding:12px; }
+        .recap-hero { display:flex; align-items:center; justify-content:space-between; gap:20px; padding:26px 28px; margin:8px 0 22px; border:1px solid rgba(255,255,255,.11); border-radius:24px; background:linear-gradient(120deg,rgba(49,37,83,.84),rgba(28,23,42,.64) 52%,rgba(75,27,41,.42)); box-shadow:0 24px 70px rgba(0,0,0,.28); position:relative; overflow:hidden; }
+        .recap-hero::after { content:'✦  REC  /  01'; position:absolute; right:24px; bottom:14px; color:rgba(255,255,255,.25); letter-spacing:.18em; font-size:.7rem; }
+        .hero-kicker { color:#ff8b9b; text-transform:uppercase; letter-spacing:.2em; font-size:.7rem; font-weight:700; margin-bottom:8px; }
+        .hero-copy { color:#b9b9ca; margin:0; max-width:580px; }
+        .hero-orb { width:74px; height:74px; flex:none; display:grid; place-items:center; border-radius:23px; color:#fff; font-size:2rem; background:linear-gradient(145deg,var(--coral),var(--violet)); box-shadow:0 0 45px rgba(255,79,103,.36); transform:rotate(-8deg); }
+        .section-label { color:#ff8b9b; font-weight:700; letter-spacing:.14em; font-size:.72rem; text-transform:uppercase; margin:18px 0 8px; }
+        @media (max-width:700px) { .recap-hero { padding:20px; } .hero-orb { width:54px; height:54px; border-radius:17px; font-size:1.4rem; } .recap-hero::after { display:none; } }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def main():
-    st.markdown("# 🎬 RecapLab")
+    apply_cinematic_theme()
+    st.markdown(
+        """
+        <div class='recap-hero'>
+          <div><div class='hero-kicker'>AI POST-PRODUCTION / GEMINI WORKSPACE</div><h1>RecapLab</h1><p class='hero-copy'>Turn a movie into a sharper story with natural translation, cinematic narration, and a clean final cut.</p></div>
+          <div class='hero-orb'>🎬</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
     st.caption("Gemini-powered movie recap studio · subtitles are intentionally disabled in this version")
 
     with st.expander("🔐 Gemini API Settings — API Key ကို ဒီမှာထည့်ပါ", expanded=not bool(get_api_key())):
@@ -187,14 +259,27 @@ def main():
     with right:
         st.subheader("1 · ပြန်ရေးမည့် ဘာသာစကား")
         language = st.selectbox("Language", LANGUAGES, label_visibility="collapsed")
-        duration = st.selectbox("Recap အရှည်", ["30 seconds", "60 seconds", "90 seconds", "3 minutes"], index=1)
+        mode = st.selectbox("လုပ်ဆောင်မည့်ပုံစံ", ["Faithful full translation", "Original recap"], help="Faithful mode က အကြောင်းအရာအားလုံးကို မကျန်အောင် သဘာဝကျကျ ဘာသာပြန်ပေးမယ်။ Original recap က အကျဉ်းချုပ် Script အသစ်ရေးပေးမယ်။")
+        video_duration = get_video_duration(st.session_state.video_path)
+        if video_duration:
+            st.caption(f"Video အရှည်: {video_duration // 60}m {video_duration % 60:02d}s")
+            default_duration = min(60, video_duration)
+            if mode == "Faithful full translation":
+                duration_seconds = video_duration
+                st.info("Faithful Translation Mode: Video ထဲက အကြောင်းအရာအားလုံးကို မကျန်အောင် ပြန်ပေးမယ်။")
+            else:
+                duration_seconds = st.number_input("Recap အရှည် (စက္ကန့်)", min_value=5, max_value=video_duration, value=default_duration, step=5, help="Video အရှည်ထက် မကျော်ဘဲ ကိုယ်လိုချင်သလို ထည့်ပါ။")
+        else:
+            st.warning("Video အရှည်ကို မဖတ်နိုင်ပါ။ FFmpeg/FFprobe ကို စစ်ပါ။")
+            duration_seconds = 3600
         tone = st.selectbox("Script style", ["Cinematic and concise", "Fast TikTok style", "Calm documentary", "Dramatic storyteller"])
         if st.button("Gemini နဲ့ Script ပြန်ရေးမယ်", type="primary", use_container_width=True):
-            with st.spinner("Video ကို Gemini က သုံးသပ်ပြီး Copy မဖြစ်အောင် Script ပြန်ရေးနေပါတယ်..."):
+            progress_message = "Video ကို Gemini က သုံးသပ်ပြီး အကြောင်းအရာအားလုံးကို သဘာဝကျကျ ဘာသာပြန်နေပါတယ်..." if mode == "Faithful full translation" else "Video ကို Gemini က သုံးသပ်ပြီး Copy မဖြစ်အောင် Script ပြန်ရေးနေပါတယ်..."
+            with st.spinner(progress_message):
                 try:
-                    st.session_state.script = generate_recap_script(st.session_state.video_path, language, duration, tone)
+                    st.session_state.script = generate_recap_script(st.session_state.video_path, language, int(duration_seconds), tone, mode)
                     st.session_state.audio = None
-                    st.success("Original recap script ရပါပြီ။")
+                    st.success("အကြောင်းအရာအပြည့်အစုံ သဘာဝကျကျ ဘာသာပြန်ပြီးပါပြီ။" if mode == "Faithful full translation" else "Original recap script ရပါပြီ။")
                 except Exception as exc:
                     st.error(api_error_message(exc))
 
@@ -235,3 +320,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+        
