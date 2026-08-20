@@ -320,17 +320,25 @@ def main():
         st.session_state.blurred_video_path = None
         st.session_state.output_video = None
 
+    video_duration = get_video_duration(st.session_state.video_path)
     left, right = st.columns([1.15, 1])
     with left:
         st.subheader("Original video")
         st.video(upload)
         st.caption(f"{upload.name} · {upload.size / 1024 / 1024:.1f} MB")
+        if video_duration:
+            duration_col, status_col = st.columns(2)
+            with duration_col:
+                st.metric("Video အရှည်", format_duration(video_duration))
+            with status_col:
+                st.metric("Duration seconds", f"{video_duration}s")
+        else:
+            st.error("Video အရှည်ကို မဖတ်နိုင်ပါ။")
 
     with right:
         st.subheader("1 · ပြန်ရေးမည့် ဘာသာစကား")
         language = st.selectbox("Language", LANGUAGES, label_visibility="collapsed")
         mode = st.selectbox("လုပ်ဆောင်မည့်ပုံစံ", ["Faithful full translation", "Original recap"], help="Faithful mode က အကြောင်းအရာအားလုံးကို မကျန်အောင် သဘာဝကျကျ ဘာသာပြန်ပေးမယ်။ Original recap က အကျဉ်းချုပ် Script အသစ်ရေးပေးမယ်။")
-        video_duration = get_video_duration(st.session_state.video_path)
         duration_valid = True
         if video_duration:
             st.caption(f"Video အရှည်: {format_duration(video_duration)}")
@@ -461,3 +469,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
