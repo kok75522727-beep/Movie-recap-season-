@@ -181,7 +181,7 @@ def pcm_to_wav(pcm: bytes) -> bytes:
     with wave.open(output.name, "wb") as wav_file:
         wav_file.setnchannels(1)
         wav_file.setsampwidth(2)
-                wav_file.setframerate(24000)
+                    wav_file.setframerate(24000)
         wav_file.writeframes(pcm)
     data = Path(output.name).read_bytes()
     Path(output.name).unlink(missing_ok=True)
@@ -545,4 +545,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-                
+    
