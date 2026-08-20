@@ -1,5 +1,6 @@
 import base64
 import os
+from io import BytesIO
 import subprocess
 import tempfile
 import wave
@@ -7,6 +8,8 @@ from pathlib import Path
 
 import streamlit as st
 from google import genai
+from PIL import Image
+from streamlit_drawable_canvas import st_canvas
 
 st.set_page_config(page_title="RecapLab · Gemini Movie Recap", page_icon="🎬", layout="wide")
 
@@ -72,6 +75,29 @@ def get_video_duration(video_path: Path) -> int | None:
         return max(1, round(float(result.stdout.strip())))
     except (subprocess.SubprocessError, ValueError, FileNotFoundError):
         return None
+
+
+def parse_duration_input(value: str) -> int:
+    cleaned = value.strip().lower().replace(".", ":")
+    if ":" in cleaned:
+        parts = cleaned.split(":")
+        if len(parts) != 2 or not all(part.strip().isdigit() for part in parts):
+            raise ValueError("အချိန်ကို 1:18 သို့မဟုတ် 0:45 ပုံစံနဲ့ ထည့်ပါ။")
+        minutes, seconds = (int(part) for part in parts)
+        if seconds >= 60:
+            raise ValueError("စက္ကန့်ကို 00 မှ 59 အတွင်း ထည့်ပါ။")
+        total = minutes * 60 + seconds
+    elif cleaned.isdigit():
+        total = int(cleaned)
+    else:
+        raise ValueError("အချိန်ကို 1:18 သို့မဟုတ် 1.18 ပုံစံနဲ့ ထည့်ပါ။")
+    if total < 5:
+        raise ValueError("Recap အရှည် အနည်းဆုံး 5 seconds ဖြစ်ရပါမယ်။")
+    return total
+
+
+def format_duration(seconds: int) -> str:
+    return f"{seconds // 60}:{seconds % 60:02d}"
 
 
 def generate_recap_script(video_path: Path, language: str, duration_seconds: int, tone: str, mode: str) -> str:
@@ -141,14 +167,57 @@ def pcm_to_wav(pcm: bytes) -> bytes:
     return data
 
 
+def extract_preview_frame(video_path: Path) -> Image.Image:
+    result = subprocess.run(
+        ["ffmpeg", "-y", "-ss", "0", "-i", str(video_path), "-frames:v", "1", "-f", "image2pipe", "-vcodec", "png", "pipe:1"],
+        capture_output=True,
+        timeout=60,
+        check=True,
+    )
+    return Image.open(BytesIO(result.stdout)).convert("RGB")
+
+
+def get_video_dimensions(video_path: Path) -> tuple[int, int]:
+    result = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "csv=s=x:p=0", str(video_path)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=True,
+    )
+    width, height = result.stdout.strip().split("x")
+    return int(width), int(height)
+
+
+def apply_region_blur(video_path: Path, box: tuple[int, int, int, int]) -> Path:
+    x, y, width, height = box
+    output_path = Path(tempfile.mktemp(suffix="-blurred.mp4"))
+    width = max(2, width - (width % 2))
+    height = max(2, height - (height % 2))
+    filter_graph = f"[0:v]split=2[base][blur];[blur]crop={width}:{height}:{x}:{y},boxblur=18:2[blurred];[base][blurred]overlay={x}:{y}[v]"
+    command = [
+        "ffmpeg", "-y", "-i", str(video_path), "-filter_complex", filter_graph,
+        "-map", "[v]", "-map", "0:a?", "-c:v", "libx264", "-preset", "veryfast", "-crf", "22",
+        "-c:a", "copy", "-movflags", "+faststart", str(output_path),
+    ]
+    result = subprocess.run(command, capture_output=True, text=True, timeout=900)
+    if result.returncode != 0 or not output_path.exists():
+        output_path.unlink(missing_ok=True)
+        raise RuntimeError(result.stderr[-1200:])
+    return output_path
+
+
 def merge_audio_video(video_path: Path, audio_bytes: bytes) -> bytes:
     audio_path = Path(tempfile.mktemp(suffix=".wav"))
     output_path = Path(tempfile.mktemp(suffix=".mp4"))
     audio_path.write_bytes(pcm_to_wav(audio_bytes))
+    video_duration = get_video_duration(video_path)
+    if not video_duration:
+        raise RuntimeError("Original video duration ကို မဖတ်နိုင်ပါ။")
     command = [
         "ffmpeg", "-y", "-i", str(video_path), "-i", str(audio_path),
         "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy", "-c:a", "aac",
-        "-shortest", str(output_path),
+        "-af", "apad", "-t", str(video_duration), str(output_path),
     ]
     try:
         result = subprocess.run(command, capture_output=True, text=True, timeout=600)
@@ -248,6 +317,7 @@ def main():
         st.session_state.video_name = upload.name
         st.session_state.script = ""
         st.session_state.audio = None
+        st.session_state.blurred_video_path = None
         st.session_state.output_video = None
 
     left, right = st.columns([1.15, 1])
@@ -261,19 +331,38 @@ def main():
         language = st.selectbox("Language", LANGUAGES, label_visibility="collapsed")
         mode = st.selectbox("လုပ်ဆောင်မည့်ပုံစံ", ["Faithful full translation", "Original recap"], help="Faithful mode က အကြောင်းအရာအားလုံးကို မကျန်အောင် သဘာဝကျကျ ဘာသာပြန်ပေးမယ်။ Original recap က အကျဉ်းချုပ် Script အသစ်ရေးပေးမယ်။")
         video_duration = get_video_duration(st.session_state.video_path)
+        duration_valid = True
         if video_duration:
-            st.caption(f"Video အရှည်: {video_duration // 60}m {video_duration % 60:02d}s")
-            default_duration = min(60, video_duration)
+            st.caption(f"Video အရှည်: {format_duration(video_duration)}")
             if mode == "Faithful full translation":
                 duration_seconds = video_duration
                 st.info("Faithful Translation Mode: Video ထဲက အကြောင်းအရာအားလုံးကို မကျန်အောင် ပြန်ပေးမယ်။")
             else:
-                duration_seconds = st.number_input("Recap အရှည် (စက္ကန့်)", min_value=5, max_value=video_duration, value=default_duration, step=5, help="Video အရှည်ထက် မကျော်ဘဲ ကိုယ်လိုချင်သလို ထည့်ပါ။")
+                default_duration = min(60, video_duration)
+                duration_text = st.text_input("Recap အရှည် (mm:ss)", value=format_duration(default_duration), help="ဥပမာ 1:18 သို့မဟုတ် 1.18 ထည့်ပါ။ Video အရှည်ထက် မကျော်ရပါ။")
+                try:
+                    duration_seconds = parse_duration_input(duration_text)
+                    if duration_seconds > video_duration:
+                        duration_valid = False
+                        st.error(f"Recap အရှည်က Video အရှည် {format_duration(video_duration)} ထက် မကျော်ရပါ။")
+                except ValueError as exc:
+                    duration_valid = False
+                    duration_seconds = 0
+                    st.error(str(exc))
         else:
             st.warning("Video အရှည်ကို မဖတ်နိုင်ပါ။ FFmpeg/FFprobe ကို စစ်ပါ။")
-            duration_seconds = 3600
+            duration_text = st.text_input("Recap အရှည် (mm:ss)", value="1:00", help="ဥပမာ 1:18 သို့မဟုတ် 1.18 ထည့်ပါ။")
+            try:
+                duration_seconds = parse_duration_input(duration_text)
+            except ValueError as exc:
+                duration_valid = False
+                duration_seconds = 0
+                st.error(str(exc))
         tone = st.selectbox("Script style", ["Cinematic and concise", "Fast TikTok style", "Calm documentary", "Dramatic storyteller"])
         if st.button("Gemini နဲ့ Script ပြန်ရေးမယ်", type="primary", use_container_width=True):
+            if not duration_valid:
+                st.warning("အရင်ဆုံး Recap အရှည်ကို မှန်ကန်အောင် ထည့်ပါ။")
+                st.stop()
             progress_message = "Video ကို Gemini က သုံးသပ်ပြီး အကြောင်းအရာအားလုံးကို သဘာဝကျကျ ဘာသာပြန်နေပါတယ်..." if mode == "Faithful full translation" else "Video ကို Gemini က သုံးသပ်ပြီး Copy မဖြစ်အောင် Script ပြန်ရေးနေပါတယ်..."
             with st.spinner(progress_message):
                 try:
@@ -291,16 +380,68 @@ def main():
         st.download_button("Script ဒေါင်းရန်", st.session_state.script, file_name="recap-script.txt", mime="text/plain")
 
         st.divider()
-        st.subheader("3 · Gemini အသံရွေးပြီး အသံသွင်းပါ")
-        voice = st.selectbox("Gemini voice", list(VOICE_OPTIONS.keys()), format_func=lambda item: f"{item} · {VOICE_OPTIONS[item]}")
-        style = st.selectbox("Voice style", ["cinematic narrator", "warm narrator", "energetic creator", "serious documentary"])
-        if st.button("Voiceover ထုတ်မယ်", type="primary", use_container_width=True):
-            with st.spinner(f"Gemini {voice} အသံနဲ့ Voiceover ပြုလုပ်နေပါတယ်..."):
-                try:
-                    st.session_state.audio = generate_voiceover(st.session_state.script, voice, style)
-                    st.success("Voiceover ရပါပြီ။")
-                except Exception as exc:
-                    st.error(api_error_message(exc))
+        st.subheader("3 · Video ထဲက စာတန်းကို လက်နဲ့ရွေးပြီး Blur လုပ်ပါ")
+        st.caption("Video ပုံပေါ်မှာ ဖျောက်ချင်တဲ့စာတန်းနေရာကို လက်နဲ့ rectangle ဆွဲပါ။")
+        try:
+            preview_frame = extract_preview_frame(st.session_state.video_path)
+            preview_width = min(720, preview_frame.width)
+            preview_height = max(240, round(preview_frame.height * preview_width / preview_frame.width))
+            canvas_result = st_canvas(
+                fill_color="rgba(255, 65, 95, 0.28)",
+                stroke_width=3,
+                stroke_color="#ff4f67",
+                background_image=preview_frame.resize((preview_width, preview_height)),
+                update_streamlit=True,
+                height=preview_height,
+                width=preview_width,
+                drawing_mode="rect",
+                key=f"blur-canvas-{st.session_state.video_name}",
+            )
+            if st.button("ရွေးထားတဲ့နေရာကို Blur လုပ်ပြီး ဆက်မယ်", type="primary", use_container_width=True):
+                objects = (canvas_result.json_data or {}).get("objects", [])
+                rectangles = [item for item in objects if item.get("type") == "rect"]
+                if not rectangles:
+                    st.warning("ဖျောက်ချင်တဲ့နေရာကို အရင် rectangle ဆွဲပါ။")
+                else:
+                    selected = rectangles[-1]
+                    original_width, original_height = get_video_dimensions(st.session_state.video_path)
+                    scale_x = original_width / preview_width
+                    scale_y = original_height / preview_height
+                    x = max(0, round(float(selected.get("left", 0)) * scale_x))
+                    y = max(0, round(float(selected.get("top", 0)) * scale_y))
+                    width = round(float(selected.get("width", 0)) * scale_x)
+                    height = round(float(selected.get("height", 0)) * scale_y)
+                    width = min(width, original_width - x)
+                    height = min(height, original_height - y)
+                    if width < 4 or height < 4:
+                        st.warning("Blur နေရာက အရမ်းသေးနေပါတယ်။ ပိုကြီးတဲ့ rectangle ဆွဲပါ။")
+                    else:
+                        with st.spinner("ရွေးထားတဲ့စာတန်းနေရာကို Blur လုပ်နေပါတယ်..."):
+                            try:
+                                st.session_state.blurred_video_path = str(apply_region_blur(st.session_state.video_path, (x, y, width, height)))
+                                st.session_state.audio = None
+                                st.success("Video စာတန်း Blur ပြီးပါပြီ။ အခု အသံရွေးနိုင်ပါပြီ။")
+                            except Exception as exc:
+                                st.error(f"Blur မအောင်မြင်ပါ: {exc}")
+        except Exception as exc:
+            st.error(f"Video frame/canvas မဖွင့်နိုင်ပါ: {exc}")
+
+        if st.session_state.get("blurred_video_path"):
+            st.video(st.session_state.blurred_video_path)
+            st.caption("Blur ပြီးသား Video Preview")
+            st.divider()
+            st.subheader("4 · Gemini အသံရွေးပြီး အသံသွင်းပါ")
+            voice = st.selectbox("Gemini voice", list(VOICE_OPTIONS.keys()), format_func=lambda item: f"{item} · {VOICE_OPTIONS[item]}")
+            style = st.selectbox("Voice style", ["cinematic narrator", "warm narrator", "energetic creator", "serious documentary"])
+            if st.button("Voiceover ထုတ်မယ်", type="primary", use_container_width=True):
+                with st.spinner(f"Gemini {voice} အသံနဲ့ Voiceover ပြုလုပ်နေပါတယ်..."):
+                    try:
+                        st.session_state.audio = generate_voiceover(st.session_state.script, voice, style)
+                        st.success("Voiceover ရပါပြီ။")
+                    except Exception as exc:
+                        st.error(api_error_message(exc))
+        else:
+            st.info("Blur လုပ်ပြီးမှ Gemini အသံရွေးတဲ့အဆင့် ပေါ်လာပါမယ်။")
 
     if st.session_state.get("audio"):
         st.audio(pcm_to_wav(st.session_state.audio), format="audio/wav")
@@ -308,8 +449,8 @@ def main():
         if st.button("Video + Voiceover ဖိုင် ထုတ်မယ်", use_container_width=True):
             with st.spinner("Video နဲ့ Voiceover ကို ပေါင်းနေပါတယ်..."):
                 try:
-                    st.session_state.output_video = merge_audio_video(st.session_state.video_path, st.session_state.audio)
-                    st.success("Output video ရပါပြီ။")
+                    st.session_state.output_video = merge_audio_video(Path(st.session_state.blurred_video_path), st.session_state.audio)
+                    st.success("Video အပြည့်အစုံနဲ့ Voiceover ကို အရှည်ကိုက်အောင် ပေါင်းပြီးပါပြီ။")
                 except Exception as exc:
                     st.error(f"FFmpeg မအောင်မြင်ပါ: {exc}")
 
@@ -320,4 +461,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-        
