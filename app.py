@@ -8,8 +8,7 @@ from pathlib import Path
 
 import streamlit as st
 from google import genai
-from PIL import Image
-from streamlit_drawable_canvas import st_canvas
+from PIL import Image, ImageDraw
 
 st.set_page_config(page_title="RecapLab · Gemini Movie Recap", page_icon="🎬", layout="wide")
 
@@ -189,15 +188,47 @@ def get_video_dimensions(video_path: Path) -> tuple[int, int]:
     return int(width), int(height)
 
 
-def apply_region_blur(video_path: Path, box: tuple[int, int, int, int]) -> Path:
-    x, y, width, height = box
+def draw_blur_selection(frame: Image.Image, boxes: list[tuple[int, int, int, int]], background_style: str) -> Image.Image:
+    preview = frame.copy().convert("RGBA")
+    draw = ImageDraw.Draw(preview, "RGBA")
+    for index, (x, y, width, height) in enumerate(boxes, start=1):
+        draw.rectangle((x, y, x + width, y + height), outline="#22b8ff", width=max(3, round(preview.width / 160)))
+        if background_style == "Solid Box":
+            draw.rectangle((x, y, x + width, y + height), fill=(20, 184, 255, 155))
+        else:
+            draw.rectangle((x, y, x + width, y + height), fill=(34, 184, 255, 55))
+        draw.text((x + 8, y + 6), f"Blur Box {index}", fill=(255, 255, 255, 235))
+    return preview.convert("RGB")
+
+
+def apply_region_blur(video_path: Path, boxes: list[tuple[int, int, int, int]], blur_strength: int, background_style: str) -> Path:
     output_path = Path(tempfile.mktemp(suffix="-blurred.mp4"))
-    width = max(2, width - (width % 2))
-    height = max(2, height - (height % 2))
-    filter_graph = f"[0:v]split=2[base][blur];[blur]crop={width}:{height}:{x}:{y},boxblur=18:2[blurred];[base][blurred]overlay={x}:{y}[v]"
+    filter_parts = []
+    previous = "0:v"
+    for index, (x, y, width, height) in enumerate(boxes):
+        width = max(2, width - (width % 2))
+        height = max(2, height - (height % 2))
+        x = max(0, x)
+        y = max(0, y)
+        base = f"base{index}"
+        region = f"region{index}"
+        masked = f"masked{index}"
+        output = "vout" if index == len(boxes) - 1 else f"stage{index}"
+        filter_parts.append(f"[{previous}]split=2[{base}][{region}]")
+        if background_style == "Solid Box":
+            filter_parts.append(f"color=c=0x16b8ff@0.78:s={width}x{height}:d=1[solid{index}]")
+            filter_parts.append(f"[{base}][solid{index}]overlay={x}:{y}[{output}]")
+        elif background_style == "Transparent":
+            filter_parts.append(f"[{region}]crop={width}:{height}:{x}:{y},boxblur={blur_strength}:2[{masked}]")
+            filter_parts.append(f"[{base}][{masked}]overlay={x}:{y}[{output}]")
+        else:
+            filter_parts.append(f"[{region}]crop={width}:{height}:{x}:{y},boxblur={blur_strength}:2[{masked}]")
+            filter_parts.append(f"[{base}][{masked}]overlay={x}:{y}[{output}]")
+        previous = output
+    filter_graph = ";".join(filter_parts)
     command = [
         "ffmpeg", "-y", "-i", str(video_path), "-filter_complex", filter_graph,
-        "-map", "[v]", "-map", "0:a?", "-c:v", "libx264", "-preset", "veryfast", "-crf", "22",
+        "-map", "[vout]", "-map", "0:a?", "-c:v", "libx264", "-preset", "veryfast", "-crf", "22",
         "-c:a", "copy", "-movflags", "+faststart", str(output_path),
     ]
     result = subprocess.run(command, capture_output=True, text=True, timeout=900)
@@ -318,6 +349,8 @@ def main():
         st.session_state.script = ""
         st.session_state.audio = None
         st.session_state.blurred_video_path = None
+        st.session_state.blur_masks = None
+        st.session_state.blur_enabled = False
         st.session_state.output_video = None
 
     video_duration = get_video_duration(st.session_state.video_path)
@@ -388,51 +421,50 @@ def main():
         st.download_button("Script ဒေါင်းရန်", st.session_state.script, file_name="recap-script.txt", mime="text/plain")
 
         st.divider()
-        st.subheader("3 · Video ထဲက စာတန်းကို လက်နဲ့ရွေးပြီး Blur လုပ်ပါ")
-        st.caption("Video ပုံပေါ်မှာ ဖျောက်ချင်တဲ့စာတန်းနေရာကို လက်နဲ့ rectangle ဆွဲပါ။")
+        st.subheader("3 · Effects / Blur Mask (MAX 3)")
+        st.caption("Reference ပုံစံအတိုင်း Blur Mask ကို ဖွင့်ပြီး Video ပေါ်က အနီ/အပြာဘောင်နဲ့ ရွေးထားတဲ့နေရာကို ကြည့်ပါ။")
         try:
             preview_frame = extract_preview_frame(st.session_state.video_path)
+            original_width, original_height = get_video_dimensions(st.session_state.video_path)
             preview_width = min(720, preview_frame.width)
             preview_height = max(240, round(preview_frame.height * preview_width / preview_frame.width))
-            canvas_result = st_canvas(
-                fill_color="rgba(255, 65, 95, 0.28)",
-                stroke_width=3,
-                stroke_color="#ff4f67",
-                background_image=preview_frame.resize((preview_width, preview_height)),
-                update_streamlit=True,
-                height=preview_height,
-                width=preview_width,
-                drawing_mode="rect",
-                key=f"blur-canvas-{st.session_state.video_name}",
-            )
-            if st.button("ရွေးထားတဲ့နေရာကို Blur လုပ်ပြီး ဆက်မယ်", type="primary", use_container_width=True):
-                objects = (canvas_result.json_data or {}).get("objects", [])
-                rectangles = [item for item in objects if item.get("type") == "rect"]
-                if not rectangles:
-                    st.warning("ဖျောက်ချင်တဲ့နေရာကို အရင် rectangle ဆွဲပါ။")
-                else:
-                    selected = rectangles[-1]
-                    original_width, original_height = get_video_dimensions(st.session_state.video_path)
-                    scale_x = original_width / preview_width
-                    scale_y = original_height / preview_height
-                    x = max(0, round(float(selected.get("left", 0)) * scale_x))
-                    y = max(0, round(float(selected.get("top", 0)) * scale_y))
-                    width = round(float(selected.get("width", 0)) * scale_x)
-                    height = round(float(selected.get("height", 0)) * scale_y)
-                    width = min(width, original_width - x)
-                    height = min(height, original_height - y)
-                    if width < 4 or height < 4:
-                        st.warning("Blur နေရာက အရမ်းသေးနေပါတယ်။ ပိုကြီးတဲ့ rectangle ဆွဲပါ။")
-                    else:
-                        with st.spinner("ရွေးထားတဲ့စာတန်းနေရာကို Blur လုပ်နေပါတယ်..."):
-                            try:
-                                st.session_state.blurred_video_path = str(apply_region_blur(st.session_state.video_path, (x, y, width, height)))
-                                st.session_state.audio = None
-                                st.success("Video စာတန်း Blur ပြီးပါပြီ။ အခု အသံရွေးနိုင်ပါပြီ။")
-                            except Exception as exc:
-                                st.error(f"Blur မအောင်မြင်ပါ: {exc}")
+            scale_x = preview_width / original_width
+            scale_y = preview_height / original_height
+            if "blur_masks" not in st.session_state:
+                st.session_state.blur_masks = [{"x": original_width // 10, "y": original_height * 3 // 4, "width": original_width // 2, "height": max(10, original_height // 8)}]
+            blur_enabled = st.toggle("BLUR MASK (MAX 3)", value=st.session_state.get("blur_enabled", False))
+            st.session_state.blur_enabled = blur_enabled
+            if blur_enabled:
+                if st.button("+ Add Blur Box", disabled=len(st.session_state.blur_masks) >= 3):
+                    st.session_state.blur_masks.append({"x": original_width // 10, "y": original_height // 3, "width": original_width // 3, "height": max(10, original_height // 8)})
+                    st.rerun()
+                background_style = st.selectbox("Background Style", ["None", "Transparent", "Solid Box"], help="Solid Box က အပြာရောင် Box အဖြစ် ဖုံးပေးမယ်။")
+                blur_strength = st.slider("Blur Strength", 2, 40, 18)
+                preview_boxes = []
+                for index, mask in enumerate(st.session_state.blur_masks):
+                    st.markdown(f"**Blur Box {index + 1}**")
+                    box_left, box_right = st.columns(2)
+                    with box_left:
+                        mask["x"] = st.slider(f"X Position · Box {index + 1}", 0, max(0, original_width - 4), min(mask["x"], max(0, original_width - 4)), step=2, key=f"mask-x-{index}")
+                        mask["y"] = st.slider(f"Y Position · Box {index + 1}", 0, max(0, original_height - 4), min(mask["y"], max(0, original_height - 4)), step=2, key=f"mask-y-{index}")
+                    with box_right:
+                        mask["width"] = st.slider(f"Width · Box {index + 1}", 4, max(4, original_width - mask["x"]), min(mask["width"], max(4, original_width - mask["x"])), step=2, key=f"mask-w-{index}")
+                        mask["height"] = st.slider(f"Height · Box {index + 1}", 4, max(4, original_height - mask["y"]), min(mask["height"], max(4, original_height - mask["y"])), step=2, key=f"mask-h-{index}")
+                    preview_boxes.append((round(mask["x"] * scale_x), round(mask["y"] * scale_y), round(mask["width"] * scale_x), round(mask["height"] * scale_y)))
+                st.image(draw_blur_selection(preview_frame.resize((preview_width, preview_height)), preview_boxes, background_style), use_container_width=True)
+                if st.button("Apply Blur Masks and Continue", type="primary", use_container_width=True):
+                    with st.spinner("Blur Mask ကို Video တစ်ခုလုံးပေါ်မှာ ထည့်နေပါတယ်..."):
+                        try:
+                            boxes = [(int(mask["x"]), int(mask["y"]), int(mask["width"]), int(mask["height"])) for mask in st.session_state.blur_masks]
+                            st.session_state.blurred_video_path = str(apply_region_blur(st.session_state.video_path, boxes, blur_strength, background_style))
+                            st.session_state.audio = None
+                            st.success("Blur Mask ပြီးပါပြီ။ အခု Gemini အသံရွေးနိုင်ပါပြီ။")
+                        except Exception as exc:
+                            st.error(f"Blur မအောင်မြင်ပါ: {exc}")
+            else:
+                st.info("Effects ထဲက BLUR MASK ကို ဖွင့်ရင် Blue Blur Box ပေါ်လာပါမယ်။")
         except Exception as exc:
-            st.error(f"Video frame/canvas မဖွင့်နိုင်ပါ: {exc}")
+            st.error(f"Video frame မဖွင့်နိုင်ပါ: {exc}")
 
         if st.session_state.get("blurred_video_path"):
             st.video(st.session_state.blurred_video_path)
@@ -469,4 +501,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
+                                                  
