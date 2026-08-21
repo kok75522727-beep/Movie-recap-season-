@@ -860,10 +860,22 @@ def apply_cinematic_theme():
         .stRadio input, .stButton button { -webkit-tap-highlight-color:transparent; }
         .stTextArea textarea:focus, .stTextInput input:focus { border-color:var(--coral) !important; box-shadow:0 0 0 1px var(--coral) !important; }
         @media (max-width:700px) {
+            [data-testid='stAppViewContainer'] .main .block-container { max-width:100% !important; padding:.45rem .55rem 1.2rem !important; }
+            h1 { font-size:1.55rem !important; line-height:1.05 !important; }
+            h2 { font-size:1.18rem !important; line-height:1.12 !important; }
+            h3 { font-size:.98rem !important; line-height:1.15 !important; }
+            p, label, [data-testid='stCaptionContainer'] { font-size:.72rem !important; line-height:1.25 !important; }
+            div[data-testid='stHorizontalBlock'] { flex-direction:row !important; flex-wrap:nowrap !important; gap:.35rem !important; align-items:flex-start !important; }
+            div[data-testid='stHorizontalBlock'] > div[data-testid='column'] { min-width:0 !important; width:0 !important; flex:1 1 0 !important; padding-left:.12rem !important; padding-right:.12rem !important; }
+            div[data-testid='stHorizontalBlock'] .stButton > button { white-space:nowrap !important; overflow:hidden !important; text-overflow:ellipsis !important; font-size:.67rem !important; padding:.28rem .22rem !important; }
             .stSelectbox, .stTextInput, .stTextArea, .stSlider, .stColorPicker, .stAlert { margin-bottom:.22rem !important; }
             [data-testid='stWidgetLabel'] { font-size:.72rem !important; line-height:1.1 !important; margin-bottom:.12rem !important; }
             .stSelectbox div[data-baseweb='select'] > div { min-height:2rem !important; padding-top:.12rem !important; padding-bottom:.12rem !important; }
-            .stButton > button, .stDownloadButton > button { min-height:2rem !important; padding:.34rem .58rem !important; font-size:.76rem !important; border-radius:9px !important; }
+            .stButton > button, .stDownloadButton > button { min-height:1.78rem !important; padding:.24rem .38rem !important; font-size:.68rem !important; line-height:1.08 !important; border-radius:8px !important; }
+            [data-testid='stVerticalBlockBorderWrapper'] { padding:.45rem !important; border-radius:10px !important; }
+            [data-testid='stFileUploader'] { min-height:120px !important; padding:12px 10px !important; border-radius:14px !important; }
+            [data-testid='stFileUploaderDropzone'] { min-height:80px !important; border-radius:11px !important; }
+
             .stTextArea textarea { min-height:7rem !important; padding:.5rem !important; }
             [data-testid='stVideo'] video { max-height:38vh !important; object-fit:contain !important; }
             [data-testid='stAudio'] audio { height:34px !important; }
@@ -1035,23 +1047,23 @@ def main():
     if active_step == 2:
         st.divider()
         st.subheader("2 · Copyright Edit")
-        st.caption("အုပ်စု ၂ · Anti-Copyright System — လေးခုလုံးကို ဒီအုပ်စုထဲမှာ ရွေးပါ။ Toggle မသုံးထားပါ။")
+        st.caption("🔒 Anti-Copyright System · လိုအပ်တဲ့ Effect တွေကို ရွေးပါ")
         effect_steps = [
-            ("effect_mirror", "Mirror"),
-            ("effect_auto_zoom", "Auto Zoom"),
-            ("effect_color_filter", "Color"),
-            ("effect_pitch_alter", "Pitch"),
+            ("effect_mirror", "Mirror", "ဘယ်/ညာလှန်"),
+            ("effect_auto_zoom", "Auto Zoom", "အလိုအလျောက် Zoom"),
+            ("effect_color_filter", "Color Filter", "အရောင်ပြောင်း"),
+            ("effect_pitch_alter", "Audio Pitch Alter", "အသံ Pitch ပြောင်း"),
         ]
-        effect_left, effect_right = st.columns(2)
-        for position, (effect_key, effect_label) in enumerate(effect_steps):
+        effect_left, effect_right = st.columns(2, gap="small")
+        for position, (effect_key, effect_label, effect_hint) in enumerate(effect_steps):
             target_col = effect_left if position % 2 == 0 else effect_right
             with target_col:
-                chosen = bool(st.session_state.get(effect_key, False))
-                button_text = f"✓ {effect_label}" if chosen else effect_label
-                if st.button(button_text, key=f"effect-group-{effect_key}", use_container_width=True):
-                    st.session_state[effect_key] = not chosen
-                    st.rerun()
-        st.caption("Effect ကိုရွေးပြီး အုပ်စု ၃ သို့ ဆက်သွားပါ။")
+                with st.container(border=True):
+                    selected = st.checkbox(effect_label, value=bool(st.session_state.get(effect_key, False)), key=f"effect-card-{effect_key}", help=effect_hint)
+                    st.session_state[effect_key] = selected
+        with st.container(border=True):
+            st.session_state.effect_freeze_bypass = st.checkbox("Freeze + Zoom Bypass (Advanced)", value=bool(st.session_state.get("effect_freeze_bypass", False)), key="effect-freeze-bypass")
+        st.caption("ရွေးထားတဲ့ Effect တွေကို Video ထုတ်တဲ့အချိန်မှာ အတူတူအသုံးချပါမယ်။")
         if st.button("အုပ်စု ၃ သို့ →", key="effect-group-next", type="primary", use_container_width=False):
             st.session_state.workflow_step = 3
             st.rerun()
